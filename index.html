@@ -573,8 +573,12 @@
       cursor: grabbing;
     }
 
+    #map.is-dragging path.union {
+      transition: none;
+    }
+
     #map path.union.dimmed {
-      opacity: 0.2;
+      opacity: 1;
     }
 
     #map path.union.selected {
@@ -1368,6 +1372,8 @@
       pinchTouchIdA: null,
       pinchTouchIdB: null,
       pinchLastDistance: 0,
+      viewBoxRafId: null,
+      queuedViewBox: null,
       wheelRafId: null,
       wheelFactor: 1,
       wheelPointX: 0,
@@ -2116,19 +2122,29 @@
         return;
       }
 
-      const base = appState.baseViewBox;
-      const width = base.width * PHONE_DEFAULT_ZOOM_FACTOR;
-      const height = base.height * PHONE_DEFAULT_ZOOM_FACTOR;
-      setViewBox({
-        x: base.x + (base.width - width) / 2,
-        y: base.y + (base.height - height) / 2,
-        width,
-        height
-      }, Boolean(animate), animate ? ZOOM_FOCUS_DURATION : 0);
+      const target = phoneDefaultViewBox(appState.baseViewBox);
+      if (!target) {
+        return;
+      }
+      setViewBox(target, Boolean(animate), animate ? ZOOM_FOCUS_DURATION : 0);
       setStatus("Map ready.");
       if (!appState.mobileBottomLocked && !normalizeSearch(ui.searchInput.value)) {
         setMobileBottomHidden(false);
       }
+    }
+
+    function phoneDefaultViewBox(base) {
+      if (!base) {
+        return null;
+      }
+      const width = base.width * PHONE_DEFAULT_ZOOM_FACTOR;
+      const height = base.height * PHONE_DEFAULT_ZOOM_FACTOR;
+      return {
+        x: base.x + (base.width - width) / 2,
+        y: base.y + (base.height - height) / 2,
+        width,
+        height
+      };
     }
 
     function zoomBy(factor, animate, durationMs) {
@@ -2183,6 +2199,11 @@
       appState.pinchTouchIdA = null;
       appState.pinchTouchIdB = null;
       appState.pinchLastDistance = 0;
+      if (appState.viewBoxRafId) {
+        cancelAnimationFrame(appState.viewBoxRafId);
+        appState.viewBoxRafId = null;
+      }
+      appState.queuedViewBox = null;
       if (appState.wheelRafId) {
         cancelAnimationFrame(appState.wheelRafId);
         appState.wheelRafId = null;
@@ -2201,10 +2222,15 @@
       const height = Math.max(460, Math.floor(ui.map.clientHeight));
 
       appState.baseViewBox = { x: 0, y: 0, width, height };
-      ui.map.setAttribute("viewBox", "0 0 " + width + " " + height);
+      const initialViewBox = isPhoneScreen()
+        ? phoneDefaultViewBox(appState.baseViewBox)
+        : { ...appState.baseViewBox };
+      appState.currentViewBox = initialViewBox || { ...appState.baseViewBox };
+      applyViewBox(appState.currentViewBox);
       ui.map.setAttribute("preserveAspectRatio", "xMidYMid meet");
 
       const project = createProjector(appState.bounds, width, height, 22);
+      const touchRenderMode = isTouchLikeDevice();
       const BATCH = 500;
       const total = appState.unions.length;
 
@@ -2214,7 +2240,7 @@
 
         for (let j = i; j < end; j++) {
           const union = appState.unions[j];
-          const built = geometryToPathWithBounds(union.geometry, project);
+          const built = geometryToPathWithBounds(union.geometry, project, touchRenderMode);
           if (!built.d || !built.bounds) continue;
 
           union.screenBounds = built.bounds;
@@ -2246,10 +2272,12 @@
       if (appState.currentSelection) {
         focusEntry(appState.currentSelection, false, true);
       } else {
-        if (isPhoneScreen()) {
-          setPhoneDefaultView();
-        } else {
-          resetView(false);
+        appState.currentSelection = null;
+        applySelection([]);
+        setStatus("Map ready.");
+        scheduleLabelRender(110);
+        if (!appState.mobileBottomLocked && !normalizeSearch(ui.searchInput.value)) {
+          setMobileBottomHidden(false);
         }
       }
     }
@@ -2257,11 +2285,10 @@
     function applySelection(keys) {
       const selected = new Set(keys || []);
       appState.selectedKeys = selected;
-      const hasSelection = selected.size > 0 && selected.size < appState.pathByKey.size;
 
       for (const [key, path] of appState.pathByKey) {
         path.classList.toggle("selected", selected.has(key));
-        path.classList.toggle("dimmed", hasSelection && !selected.has(key));
+        path.classList.remove("dimmed");
       }
     }
 
@@ -2370,9 +2397,7 @@
         width: appState.dragStartViewBox.width,
         height: appState.dragStartViewBox.height
       };
-      const clamped = clampViewBox(target, appState.baseViewBox);
-      appState.currentViewBox = clamped;
-      applyViewBox(clamped);
+      setViewBoxLive(target);
     }
 
     function onWindowMouseUp() {
@@ -2436,7 +2461,7 @@
         const centerY = (touchA.clientY + touchB.clientY) / 2 - rect.top;
         if (appState.pinchLastDistance > 0) {
           const factor = clamp(appState.pinchLastDistance / distance, 0.72, 1.38);
-          zoomAtPoint(factor, centerX, centerY, false, 0);
+          zoomAtPointLive(factor, centerX, centerY);
           appState.suppressNextClick = true;
         }
         appState.pinchLastDistance = distance;
@@ -2478,9 +2503,7 @@
         width: appState.dragStartViewBox.width,
         height: appState.dragStartViewBox.height
       };
-      const clamped = clampViewBox(target, appState.baseViewBox);
-      appState.currentViewBox = clamped;
-      applyViewBox(clamped);
+      setViewBoxLive(target);
     }
 
     function onMapTouchEnd(event) {
@@ -2493,6 +2516,7 @@
         } else {
           clearTouchPinchState();
           ui.map.classList.remove("is-dragging");
+          scheduleLabelRender(90);
         }
         appState.suppressNextClick = true;
         if (event && typeof event.preventDefault === "function") {
@@ -2515,6 +2539,7 @@
       if (appState.pinchActive) {
         clearTouchPinchState();
         ui.map.classList.remove("is-dragging");
+        scheduleLabelRender(90);
         appState.suppressNextClick = true;
         if (event && typeof event.preventDefault === "function") {
           event.preventDefault();
@@ -2953,11 +2978,43 @@
       );
     }
 
+    function zoomAtPointLive(factor, pointX, pointY) {
+      if (!appState.baseViewBox || !appState.currentViewBox) {
+        return;
+      }
+
+      const safeFactor = clamp(factor, 0.4, 2.4);
+      const from = appState.currentViewBox;
+      const rect = ui.map.getBoundingClientRect();
+      const viewportWidth = Math.max(1, rect.width);
+      const viewportHeight = Math.max(1, rect.height);
+      const px = clamp(pointX, 0, viewportWidth);
+      const py = clamp(pointY, 0, viewportHeight);
+      const ratioX = px / viewportWidth;
+      const ratioY = py / viewportHeight;
+      const anchorX = from.x + from.width * ratioX;
+      const anchorY = from.y + from.height * ratioY;
+      const nextWidth = from.width * safeFactor;
+      const nextHeight = from.height * safeFactor;
+
+      setViewBoxLive({
+        x: anchorX - nextWidth * ratioX,
+        y: anchorY - nextHeight * ratioY,
+        width: nextWidth,
+        height: nextHeight
+      });
+    }
+
     function setViewBox(target, animate, durationMs) {
       if (!appState.baseViewBox) {
         return;
       }
       const clamped = clampViewBox(target, appState.baseViewBox);
+      if (appState.viewBoxRafId) {
+        cancelAnimationFrame(appState.viewBoxRafId);
+        appState.viewBoxRafId = null;
+      }
+      appState.queuedViewBox = null;
       if (animate) {
         const ms = clamp(Number(durationMs) || 220, 120, 380);
         animateViewBox(appState.currentViewBox || appState.baseViewBox, clamped, ms);
@@ -2971,6 +3028,34 @@
         scheduleLabelRender(110);
       }
       appState.currentViewBox = clamped;
+    }
+
+    function setViewBoxLive(target) {
+      if (!appState.baseViewBox) {
+        return;
+      }
+      const clamped = clampViewBox(target, appState.baseViewBox);
+      if (appState.viewAnimationId) {
+        cancelAnimationFrame(appState.viewAnimationId);
+        appState.viewAnimationId = null;
+      }
+      appState.currentViewBox = clamped;
+      queueViewBoxApply(clamped);
+    }
+
+    function queueViewBoxApply(viewBox) {
+      appState.queuedViewBox = viewBox;
+      if (appState.viewBoxRafId) {
+        return;
+      }
+      appState.viewBoxRafId = requestAnimationFrame(() => {
+        appState.viewBoxRafId = null;
+        const next = appState.queuedViewBox;
+        appState.queuedViewBox = null;
+        if (next) {
+          applyViewBox(next);
+        }
+      });
     }
 
     function clampViewBox(candidate, base) {
@@ -3335,10 +3420,12 @@
       };
     }
 
-    function geometryToPathWithBounds(geometry, project) {
+    function geometryToPathWithBounds(geometry, project, touchModeOverride) {
       if (!geometry || !geometry.type || !geometry.coordinates) {
         return { d: "", bounds: null };
       }
+      const touchMode = Boolean(touchModeOverride);
+      const pathDecimals = touchMode ? 1 : 2;
 
       let path = "";
       let minX = Infinity;
@@ -3351,7 +3438,9 @@
           return;
         }
         let ringPath = "";
-        for (const point of ring) {
+        const pointStep = touchMode ? (ring.length > 220 ? 3 : ring.length > 110 ? 2 : 1) : 1;
+        for (let i = 0; i < ring.length; i += pointStep) {
+          const point = ring[i];
           const lon = Number(point && point[0]);
           const lat = Number(point && point[1]);
           if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
@@ -3367,7 +3456,23 @@
           if (y < minY) minY = y;
           if (y > maxY) maxY = y;
 
-          ringPath += (ringPath ? "L" : "M") + x.toFixed(2) + "," + y.toFixed(2);
+          ringPath += (ringPath ? "L" : "M") + x.toFixed(pathDecimals) + "," + y.toFixed(pathDecimals);
+        }
+
+        if (pointStep > 1) {
+          const last = ring[ring.length - 1];
+          const lonLast = Number(last && last[0]);
+          const latLast = Number(last && last[1]);
+          if (Number.isFinite(lonLast) && Number.isFinite(latLast)) {
+            const projectedLast = project(lonLast, latLast);
+            const xLast = projectedLast[0];
+            const yLast = projectedLast[1];
+            if (xLast < minX) minX = xLast;
+            if (xLast > maxX) maxX = xLast;
+            if (yLast < minY) minY = yLast;
+            if (yLast > maxY) maxY = yLast;
+            ringPath += (ringPath ? "L" : "M") + xLast.toFixed(pathDecimals) + "," + yLast.toFixed(pathDecimals);
+          }
         }
 
         if (ringPath) {
