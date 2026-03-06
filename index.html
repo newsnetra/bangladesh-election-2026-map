@@ -1835,7 +1835,7 @@
       });
     }
 
-    function focusEntry(entry, animate, silent) {
+    function focusEntry(entry, animate, silent, options) {
       if (!entry || !entry.keys || entry.keys.length === 0) {
         return;
       }
@@ -1848,8 +1848,23 @@
 
       const expanded = expandBounds(targetBounds, 0.2);
       const fitted = fitBoundsToAspect(expanded, appState.baseViewBox.width / appState.baseViewBox.height);
-      const viewWidth = fitted.maxX - fitted.minX;
-      const viewHeight = fitted.maxY - fitted.minY;
+      let viewWidth = fitted.maxX - fitted.minX;
+      let viewHeight = fitted.maxY - fitted.minY;
+      const opts = options || {};
+      if (opts.gentle && appState.baseViewBox) {
+        const currentBox = appState.currentViewBox || appState.baseViewBox;
+        const minBaseFraction = isNarrowScreen() ? 0.3 : 0.24;
+        const minWidth = Math.max(
+          appState.baseViewBox.width * minBaseFraction,
+          currentBox.width * 0.62
+        );
+        const minHeight = Math.max(
+          appState.baseViewBox.height * minBaseFraction,
+          currentBox.height * 0.62
+        );
+        viewWidth = Math.max(viewWidth, minWidth);
+        viewHeight = Math.max(viewHeight, minHeight);
+      }
       const centerX = (fitted.minX + fitted.maxX) / 2;
       const centerY = (fitted.minY + fitted.maxY) / 2;
       const anchorRatioX = focusAnchorRatioX();
@@ -2410,7 +2425,7 @@
       activePath = path;
       activePath.classList.add("active");
       showTooltip(event, union);
-      focusEntry(entry, true, false);
+      focusEntry(entry, true, false, { gentle: isNarrowScreen() });
     }
 
     function onMapWheel(event) {
