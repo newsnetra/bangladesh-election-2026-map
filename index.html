@@ -1258,6 +1258,7 @@
       dragStartViewBox: null,
       dragMoved: false,
       suppressNextClick: false,
+      mobileBottomLocked: false,
       touchId: null,
       pinchActive: false,
       pinchTouchIdA: null,
@@ -1292,6 +1293,10 @@
       ui.searchInput.addEventListener("input", () => {
         const query = normalizeSearch(ui.searchInput.value);
         showSuggestions(ui.searchInput.value);
+        if (isNarrowScreen()) {
+          hideMobileBottomUntilReset();
+          return;
+        }
         if (query) {
           setMobileBottomHidden(true);
         } else if (!appState.currentSelection) {
@@ -1310,7 +1315,7 @@
       });
 
       ui.searchInput.addEventListener("focus", () => {
-        setMobileBottomHidden(true);
+        hideMobileBottomUntilReset();
       });
 
       document.addEventListener("click", (event) => {
@@ -1323,6 +1328,7 @@
       ui.resetMapBtn.addEventListener("click", () => {
         ui.searchInput.value = "";
         hideSuggestions();
+        appState.mobileBottomLocked = false;
         resetView(true);
         setMobileBottomHidden(false);
       });
@@ -1812,7 +1818,7 @@
     function selectSuggestion(entry) {
       ui.searchInput.value = entry.label;
       hideSuggestions();
-      setMobileBottomHidden(true);
+      hideMobileBottomUntilReset();
       focusEntry(entry, true, false);
     }
 
@@ -1855,7 +1861,7 @@
       }, animate, animate ? ZOOM_FOCUS_DURATION : 0);
 
       applySelection(entry.keys);
-      setMobileBottomHidden(true);
+      hideMobileBottomUntilReset();
 
       if (!silent) {
         setStatus("Focused on " + entry.label);
@@ -1876,7 +1882,7 @@
         height: appState.baseViewBox.height
       }, animate, animate ? ZOOM_FOCUS_DURATION : 0);
       setStatus("Map ready.");
-      if (!normalizeSearch(ui.searchInput.value)) {
+      if (!appState.mobileBottomLocked && !normalizeSearch(ui.searchInput.value)) {
         setMobileBottomHidden(false);
       }
     }
@@ -2137,6 +2143,9 @@
     }
 
     function onMapTouchStart(event) {
+      if (event.touches.length > 0) {
+        hideMobileBottomUntilReset();
+      }
       if (event.touches.length !== 1) {
         return;
       }
@@ -2251,6 +2260,9 @@
         appState.suppressNextClick = false;
         return;
       }
+      if (isNarrowScreen()) {
+        hideMobileBottomUntilReset();
+      }
 
       const path = unionPathFromEventTarget(event.target);
       if (!path) {
@@ -2259,9 +2271,6 @@
           appState.currentSelection = null;
           applySelection([]);
           ui.searchInput.value = "";
-        }
-        if (event.target === ui.map) {
-          setMobileBottomHidden(isTouchLikeDevice() ? false : true);
         }
         return;
       }
@@ -2290,12 +2299,12 @@
         appState.currentSelection = null;
         applySelection([]);
         ui.searchInput.value = "";
-        setMobileBottomHidden(false);
+        hideMobileBottomUntilReset();
         return;
       }
 
       ui.searchInput.value = entry.label;
-      setMobileBottomHidden(true);
+      hideMobileBottomUntilReset();
       if (activePath && activePath !== path) {
         activePath.classList.remove("active");
       }
@@ -2311,7 +2320,7 @@
       }
 
       event.preventDefault();
-      setMobileBottomHidden(true);
+      hideMobileBottomUntilReset();
 
       const rect = ui.map.getBoundingClientRect();
       appState.wheelPointX = event.clientX - rect.left;
@@ -2847,9 +2856,21 @@
       document.body.classList.toggle("mobile-bottom-hidden", Boolean(hidden));
     }
 
+    function hideMobileBottomUntilReset() {
+      if (!isNarrowScreen()) {
+        return;
+      }
+      appState.mobileBottomLocked = true;
+      setMobileBottomHidden(true);
+    }
+
     function syncMobileBottomVisibility() {
       if (!isNarrowScreen()) {
         document.body.classList.remove("mobile-bottom-hidden");
+        return;
+      }
+      if (appState.mobileBottomLocked) {
+        setMobileBottomHidden(true);
         return;
       }
       const hasSearch = Boolean(normalizeSearch(ui.searchInput.value));
