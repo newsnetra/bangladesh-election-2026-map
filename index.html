@@ -1934,6 +1934,11 @@
       appState.dragStartViewBox = null;
       appState.dragMoved = false;
       appState.suppressNextClick = false;
+      appState.touchId = null;
+      appState.pinchActive = false;
+      appState.pinchTouchIdA = null;
+      appState.pinchTouchIdB = null;
+      appState.pinchLastDistance = 0;
       if (appState.wheelRafId) {
         cancelAnimationFrame(appState.wheelRafId);
         appState.wheelRafId = null;
@@ -2146,29 +2151,52 @@
       if (event.touches.length > 0) {
         hideMobileBottomUntilReset();
       }
-      if (event.touches.length !== 1) {
-        return;
-      }
       if (!appState.baseViewBox || !appState.currentViewBox) {
         return;
       }
 
-      const touch = event.touches[0];
-      appState.touchId = touch.identifier;
-      appState.isDraggingMap = true;
-      appState.dragStartX = touch.clientX;
-      appState.dragStartY = touch.clientY;
-      appState.dragStartViewBox = {
-        x: appState.currentViewBox.x,
-        y: appState.currentViewBox.y,
-        width: appState.currentViewBox.width,
-        height: appState.currentViewBox.height
-      };
-      appState.dragMoved = false;
-      ui.map.classList.add("is-dragging");
+      if (event.touches.length >= 2) {
+        startTouchPinch(event.touches[0], event.touches[1]);
+        appState.suppressNextClick = true;
+        return;
+      }
+
+      if (event.touches.length === 1) {
+        startTouchDrag(event.touches[0]);
+      }
     }
 
     function onMapTouchMove(event) {
+      if (appState.pinchActive) {
+        const touchA = findTouchById(event.touches, appState.pinchTouchIdA);
+        const touchB = findTouchById(event.touches, appState.pinchTouchIdB);
+        if (!touchA || !touchB) {
+          return;
+        }
+
+        const rect = ui.map.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) {
+          return;
+        }
+
+        const distance = touchDistance(touchA, touchB);
+        if (!Number.isFinite(distance) || distance <= 0) {
+          return;
+        }
+
+        const centerX = (touchA.clientX + touchB.clientX) / 2 - rect.left;
+        const centerY = (touchA.clientY + touchB.clientY) / 2 - rect.top;
+        if (appState.pinchLastDistance > 0) {
+          const factor = clamp(appState.pinchLastDistance / distance, 0.72, 1.38);
+          zoomAtPoint(factor, centerX, centerY, false, 0);
+          appState.suppressNextClick = true;
+        }
+        appState.pinchLastDistance = distance;
+        hideTooltip();
+        event.preventDefault();
+        return;
+      }
+
       if (!appState.isDraggingMap || !appState.dragStartViewBox || !appState.baseViewBox) {
         return;
       }
@@ -2208,6 +2236,23 @@
     }
 
     function onMapTouchEnd(event) {
+      if (appState.pinchActive) {
+        if (event.touches.length >= 2) {
+          startTouchPinch(event.touches[0], event.touches[1]);
+        } else if (event.touches.length === 1) {
+          clearTouchPinchState();
+          startTouchDrag(event.touches[0]);
+        } else {
+          clearTouchPinchState();
+          ui.map.classList.remove("is-dragging");
+        }
+        appState.suppressNextClick = true;
+        if (event && typeof event.preventDefault === "function") {
+          event.preventDefault();
+        }
+        return;
+      }
+
       if (!appState.isDraggingMap) {
         return;
       }
@@ -2219,10 +2264,17 @@
     }
 
     function onMapTouchCancel(event) {
-      if (!appState.isDraggingMap) {
-        return;
+      if (appState.pinchActive) {
+        clearTouchPinchState();
+        ui.map.classList.remove("is-dragging");
+        appState.suppressNextClick = true;
+        if (event && typeof event.preventDefault === "function") {
+          event.preventDefault();
+        }
       }
-      finishMapDrag(event, true);
+      if (appState.isDraggingMap) {
+        finishMapDrag(event, true);
+      }
     }
 
     function finishMapDrag(event, fromTouch) {
@@ -2253,6 +2305,53 @@
         }
       }
       return null;
+    }
+
+    function startTouchDrag(touch) {
+      if (!touch || !appState.currentViewBox) {
+        return;
+      }
+      appState.touchId = touch.identifier;
+      appState.isDraggingMap = true;
+      appState.dragStartX = touch.clientX;
+      appState.dragStartY = touch.clientY;
+      appState.dragStartViewBox = {
+        x: appState.currentViewBox.x,
+        y: appState.currentViewBox.y,
+        width: appState.currentViewBox.width,
+        height: appState.currentViewBox.height
+      };
+      appState.dragMoved = false;
+      ui.map.classList.add("is-dragging");
+    }
+
+    function startTouchPinch(touchA, touchB) {
+      if (!touchA || !touchB) {
+        return;
+      }
+      appState.pinchActive = true;
+      appState.pinchTouchIdA = touchA.identifier;
+      appState.pinchTouchIdB = touchB.identifier;
+      appState.pinchLastDistance = touchDistance(touchA, touchB);
+      appState.isDraggingMap = false;
+      appState.dragStartViewBox = null;
+      appState.dragMoved = false;
+      appState.touchId = null;
+      ui.map.classList.add("is-dragging");
+      hideTooltip();
+    }
+
+    function clearTouchPinchState() {
+      appState.pinchActive = false;
+      appState.pinchTouchIdA = null;
+      appState.pinchTouchIdB = null;
+      appState.pinchLastDistance = 0;
+    }
+
+    function touchDistance(touchA, touchB) {
+      const dx = touchA.clientX - touchB.clientX;
+      const dy = touchA.clientY - touchB.clientY;
+      return Math.sqrt(dx * dx + dy * dy);
     }
 
     function onMapClick(event) {
