@@ -554,6 +554,9 @@
       display: block;
       background: transparent;
       cursor: grab;
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
     }
 
     #map path.union {
@@ -1214,6 +1217,7 @@
     const ZOOM_BUTTON_FACTOR_OUT = 1.16;
     const ZOOM_BUTTON_DURATION = 240;
     const ZOOM_FOCUS_DURATION = 260;
+    const DRAG_THRESHOLD_PX = 3;
     const ui = {
       map: document.getElementById("map"),
       tooltip: document.getElementById("tooltip"),
@@ -1254,6 +1258,11 @@
       dragStartViewBox: null,
       dragMoved: false,
       suppressNextClick: false,
+      touchId: null,
+      pinchActive: false,
+      pinchTouchIdA: null,
+      pinchTouchIdB: null,
+      pinchLastDistance: 0,
       wheelRafId: null,
       wheelFactor: 1,
       wheelPointX: 0,
@@ -1333,6 +1342,12 @@
       if (!isTouchLikeDevice()) {
         ui.map.addEventListener("mousemove", onMapMouseMove);
         ui.map.addEventListener("mouseleave", onMapMouseLeave);
+      }
+      if (isTouchLikeDevice()) {
+        ui.map.addEventListener("touchstart", onMapTouchStart, { passive: true });
+        ui.map.addEventListener("touchmove", onMapTouchMove, { passive: false });
+        ui.map.addEventListener("touchend", onMapTouchEnd, { passive: false });
+        ui.map.addEventListener("touchcancel", onMapTouchCancel, { passive: false });
       }
       ui.map.addEventListener("mousedown", onMapMouseDown);
       ui.map.addEventListener("dragstart", (event) => event.preventDefault());
@@ -1848,6 +1863,7 @@
     }
 
     function resetView(animate) {
+      hideTooltip();
       appState.currentSelection = null;
       applySelection([]);
       if (!appState.baseViewBox) {
@@ -2040,6 +2056,9 @@
     }
 
     function onMapMouseDown(event) {
+      if (isTouchLikeDevice()) {
+        return;
+      }
       if (event.button !== 0) {
         return;
       }
@@ -2062,6 +2081,9 @@
     }
 
     function onWindowMouseMove(event) {
+      if (isTouchLikeDevice()) {
+        return;
+      }
       if (!appState.isDraggingMap || !appState.dragStartViewBox || !appState.baseViewBox) {
         return;
       }
@@ -2073,7 +2095,7 @@
 
       const dx = event.clientX - appState.dragStartX;
       const dy = event.clientY - appState.dragStartY;
-      if (!appState.dragMoved && (Math.abs(dx) > 2 || Math.abs(dy) > 2)) {
+      if (!appState.dragMoved && (Math.abs(dx) > DRAG_THRESHOLD_PX || Math.abs(dy) > DRAG_THRESHOLD_PX)) {
         appState.dragMoved = true;
         hideTooltip();
       }
@@ -2095,6 +2117,9 @@
     }
 
     function onWindowMouseUp() {
+      if (isTouchLikeDevice()) {
+        return;
+      }
       if (!appState.isDraggingMap) {
         return;
       }
@@ -2111,6 +2136,116 @@
       }
     }
 
+    function onMapTouchStart(event) {
+      if (event.touches.length !== 1) {
+        return;
+      }
+      if (!appState.baseViewBox || !appState.currentViewBox) {
+        return;
+      }
+
+      const touch = event.touches[0];
+      appState.touchId = touch.identifier;
+      appState.isDraggingMap = true;
+      appState.dragStartX = touch.clientX;
+      appState.dragStartY = touch.clientY;
+      appState.dragStartViewBox = {
+        x: appState.currentViewBox.x,
+        y: appState.currentViewBox.y,
+        width: appState.currentViewBox.width,
+        height: appState.currentViewBox.height
+      };
+      appState.dragMoved = false;
+      ui.map.classList.add("is-dragging");
+    }
+
+    function onMapTouchMove(event) {
+      if (!appState.isDraggingMap || !appState.dragStartViewBox || !appState.baseViewBox) {
+        return;
+      }
+
+      const touch = findTouchById(event.touches, appState.touchId);
+      if (!touch) {
+        return;
+      }
+
+      const rect = ui.map.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        return;
+      }
+
+      const dx = touch.clientX - appState.dragStartX;
+      const dy = touch.clientY - appState.dragStartY;
+      if (!appState.dragMoved && (Math.abs(dx) > DRAG_THRESHOLD_PX || Math.abs(dy) > DRAG_THRESHOLD_PX)) {
+        appState.dragMoved = true;
+        hideTooltip();
+      }
+      if (!appState.dragMoved) {
+        return;
+      }
+
+      event.preventDefault();
+      const unitsPerPxX = appState.dragStartViewBox.width / rect.width;
+      const unitsPerPxY = appState.dragStartViewBox.height / rect.height;
+      const target = {
+        x: appState.dragStartViewBox.x - dx * unitsPerPxX,
+        y: appState.dragStartViewBox.y - dy * unitsPerPxY,
+        width: appState.dragStartViewBox.width,
+        height: appState.dragStartViewBox.height
+      };
+      const clamped = clampViewBox(target, appState.baseViewBox);
+      appState.currentViewBox = clamped;
+      applyViewBox(clamped);
+    }
+
+    function onMapTouchEnd(event) {
+      if (!appState.isDraggingMap) {
+        return;
+      }
+      const ended = findTouchById(event.changedTouches, appState.touchId);
+      if (!ended) {
+        return;
+      }
+      finishMapDrag(event, true);
+    }
+
+    function onMapTouchCancel(event) {
+      if (!appState.isDraggingMap) {
+        return;
+      }
+      finishMapDrag(event, true);
+    }
+
+    function finishMapDrag(event, fromTouch) {
+      const moved = appState.dragMoved;
+      appState.isDraggingMap = false;
+      appState.dragStartViewBox = null;
+      appState.dragMoved = false;
+      appState.touchId = null;
+      ui.map.classList.remove("is-dragging");
+
+      if (moved) {
+        appState.suppressNextClick = true;
+        scheduleLabelRender(80);
+        if (fromTouch && event && typeof event.preventDefault === "function") {
+          event.preventDefault();
+        }
+      }
+    }
+
+    function findTouchById(touchList, id) {
+      if (!touchList || typeof touchList.length !== "number") {
+        return null;
+      }
+      for (let i = 0; i < touchList.length; i += 1) {
+        const touch = touchList[i];
+        if (touch && touch.identifier === id) {
+          return touch;
+        }
+      }
+      return null;
+    }
+
     function onMapClick(event) {
       if (appState.suppressNextClick) {
         appState.suppressNextClick = false;
@@ -2120,8 +2255,13 @@
       const path = unionPathFromEventTarget(event.target);
       if (!path) {
         hideTooltip();
+        if (isTouchLikeDevice()) {
+          appState.currentSelection = null;
+          applySelection([]);
+          ui.searchInput.value = "";
+        }
         if (event.target === ui.map) {
-          setMobileBottomHidden(true);
+          setMobileBottomHidden(isTouchLikeDevice() ? false : true);
         }
         return;
       }
@@ -2137,6 +2277,23 @@
         keys: [union.key],
         unionCount: 1
       };
+
+      const currentKey =
+        appState.currentSelection &&
+        appState.currentSelection.type === "union" &&
+        Array.isArray(appState.currentSelection.keys) &&
+        appState.currentSelection.keys.length === 1
+          ? appState.currentSelection.keys[0]
+          : null;
+      if (isTouchLikeDevice() && currentKey === union.key) {
+        hideTooltip();
+        appState.currentSelection = null;
+        applySelection([]);
+        ui.searchInput.value = "";
+        setMobileBottomHidden(false);
+        return;
+      }
+
       ui.searchInput.value = entry.label;
       setMobileBottomHidden(true);
       if (activePath && activePath !== path) {
