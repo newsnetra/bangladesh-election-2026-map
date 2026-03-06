@@ -1520,6 +1520,8 @@
     let tooltipMoveRafId = null;
     let queuedTooltipPoint = null;
     let labelRenderTimer = null;
+    let lastViewportWidth = window.innerWidth || 0;
+    let lastViewportHeight = window.innerHeight || 0;
     const SVG_NS = "http://www.w3.org/2000/svg";
 
     initLegend();
@@ -1530,7 +1532,21 @@
     window.addEventListener(
       "resize",
       debounce(() => {
-        renderMap();
+        const viewportWidth = window.innerWidth || 0;
+        const viewportHeight = window.innerHeight || 0;
+        const widthDelta = Math.abs(viewportWidth - lastViewportWidth);
+        const heightDelta = Math.abs(viewportHeight - lastViewportHeight);
+        const shouldRerender = !isTouchLikeDevice() || widthDelta > 12;
+
+        if (shouldRerender) {
+          renderMap();
+        } else if (heightDelta > 0) {
+          // Soft keyboard / browser chrome height shifts on touch devices.
+          scheduleLabelRender(90);
+        }
+
+        lastViewportWidth = viewportWidth;
+        lastViewportHeight = viewportHeight;
         syncMobileBottomVisibility();
       }, 150)
     );
@@ -2109,7 +2125,7 @@
       hideMobileBottomUntilReset();
       const isSingleUnion = entry && Array.isArray(entry.keys) && entry.keys.length === 1;
       hideMobileTooltip();
-      if (!isNarrowScreen()) {
+      if (!isNarrowScreen() && !isTouchLikeDevice()) {
         focusEntry(entry, true, false, { gentle: true, minBaseFraction: 0.24, maxStepIn: 0.9 });
         if (isSingleUnion) {
           // Show immediately so selection is obvious, then re-anchor after camera settle.
@@ -2404,7 +2420,20 @@
       appState.districtAnchors = computeDistrictAnchors(appState.unions);
 
       if (appState.currentSelection) {
-        focusEntry(appState.currentSelection, false, true);
+        if (isTouchLikeDevice()) {
+          applySelection(appState.currentSelection.keys || []);
+          setStatus("Selected " + appState.currentSelection.label);
+          scheduleLabelRender(110);
+          if (
+            appState.currentSelection.type === "union" &&
+            Array.isArray(appState.currentSelection.keys) &&
+            appState.currentSelection.keys.length === 1
+          ) {
+            showTooltipForEntry(appState.currentSelection, false);
+          }
+        } else {
+          focusEntry(appState.currentSelection, false, true);
+        }
       } else {
         appState.currentSelection = null;
         applySelection([]);
@@ -2819,7 +2848,7 @@
       activePath = path;
       activePath.classList.add("active");
       showSelectionTooltip(union);
-      if (isPhoneScreen()) {
+      if (isTouchLikeDevice()) {
         appState.currentSelection = entry;
         applySelection(entry.keys);
         setStatus("Selected " + entry.label);
