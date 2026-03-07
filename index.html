@@ -464,7 +464,6 @@
     .map-shell {
       position: relative;
       height: 100%;
-      padding-left: clamp(110px, 12vw, 180px);
       background:
         radial-gradient(900px 520px at 78% 22%, rgba(245, 244, 240, 0.55), transparent 65%),
         radial-gradient(800px 600px at 5% 95%, rgba(218, 216, 212, 0.7), transparent 55%),
@@ -1490,8 +1489,8 @@
     const ZOOM_BUTTON_FACTOR_OUT = 1.16;
     const ZOOM_BUTTON_DURATION = 240;
     const ZOOM_FOCUS_DURATION = 260;
-    const PHONE_DEFAULT_ZOOM_FACTOR = 0.42;
-    const TOUCH_DEFAULT_ZOOM_FACTOR = 0.62;
+    const PHONE_DEFAULT_ZOOM_FACTOR = 0.34;
+    const TOUCH_DEFAULT_ZOOM_FACTOR = 0.34;
     const DRAG_THRESHOLD_PX = 3;
     const ui = {
       map: document.getElementById("map"),
@@ -1552,7 +1551,9 @@
       wheelFactor: 1,
       wheelPointX: 0,
       wheelPointY: 0,
-      touchDataSimplified: false
+      touchDataSimplified: false,
+      projector: null,
+      touchVisibilityLastTs: 0
     };
 
     let activePath = null;
@@ -2007,7 +2008,8 @@
           marginBucket: 0,
           intensity: 0,
           color: PARTY_PALETTES[winner].light,
-          screenBounds: null
+          screenBounds: null,
+          touchPathD: null
         });
       }
 
@@ -2206,6 +2208,57 @@
       });
     }
 
+    function ensurePathForKey(key) {
+      const existing = appState.pathByKey.get(key);
+      if (existing) {
+        return existing;
+      }
+      if (!isTouchLikeDevice()) {
+        return null;
+      }
+      const union = appState.unionByKey.get(key);
+      return ensureTouchPath(union);
+    }
+
+    function ensureTouchPath(union) {
+      if (!union || !isTouchLikeDevice() || !appState.projector) {
+        return null;
+      }
+
+      let path = appState.pathByKey.get(union.key);
+      if (path) {
+        return path;
+      }
+
+      let built;
+      if (union.touchPathD) {
+        built = { d: union.touchPathD, bounds: union.screenBounds };
+      } else {
+        built = geometryToPathWithBounds(union.geometry, appState.projector, true);
+        if (!built || !built.d) {
+          return null;
+        }
+        union.touchPathD = built.d;
+        if (built.bounds && !union.screenBounds) {
+          union.screenBounds = built.bounds;
+        }
+      }
+
+      path = document.createElementNS(SVG_NS, "path");
+      path.setAttribute("d", built.d);
+      path.setAttribute("fill", union.color);
+      path.setAttribute("class", "union");
+      path.dataset.key = union.key;
+      path.dataset.hidden = "0";
+      if (appState.labelLayer && appState.labelLayer.parentNode === ui.map) {
+        ui.map.insertBefore(path, appState.labelLayer);
+      } else {
+        ui.map.appendChild(path);
+      }
+      appState.pathByKey.set(union.key, path);
+      return path;
+    }
+
     function showTooltipForEntry(entry, deferForAnimation) {
       if (!entry || !Array.isArray(entry.keys) || entry.keys.length !== 1) {
         return;
@@ -2217,7 +2270,7 @@
       }
 
       const render = () => {
-        const path = appState.pathByKey.get(key);
+        const path = ensurePathForKey(key);
         if (path) {
           if (activePath && activePath !== path) {
             activePath.classList.remove("active");
@@ -2391,6 +2444,8 @@
       appState.pathByKey = new Map();
       appState.labelLayer = null;
       appState.districtAnchors = [];
+      appState.projector = null;
+      appState.touchVisibilityLastTs = 0;
       appState.isDraggingMap = false;
       appState.dragStartViewBox = null;
       appState.dragMoved = false;
@@ -2431,8 +2486,9 @@
       ui.map.setAttribute("preserveAspectRatio", "xMidYMid meet");
 
       const project = createProjector(appState.bounds, width, height, 22);
+      appState.projector = project;
       const touchRenderMode = isTouchLikeDevice();
-      const BATCH = 500;
+      const BATCH = touchRenderMode ? 360 : 500;
       const total = appState.unions.length;
 
       for (let i = 0; i < total; i += BATCH) {
@@ -2441,7 +2497,13 @@
 
         for (let j = i; j < end; j++) {
           const union = appState.unions[j];
-          const built = geometryToPathWithBounds(union.geometry, project, touchRenderMode);
+          if (touchRenderMode) {
+            union.screenBounds = geometryToBounds(union.geometry, project);
+            union.touchPathD = null;
+            continue;
+          }
+
+          const built = geometryToPathWithBounds(union.geometry, project, false);
           if (!built.d || !built.bounds) continue;
 
           union.screenBounds = built.bounds;
@@ -2456,7 +2518,9 @@
           fragment.appendChild(path);
         }
 
-        ui.map.appendChild(fragment);
+        if (!touchRenderMode) {
+          ui.map.appendChild(fragment);
+        }
 
         // Yield to browser so partial map paints progressively
         const pct = Math.round((end / total) * 100);
@@ -2500,6 +2564,12 @@
     function applySelection(keys) {
       const selected = new Set(keys || []);
       appState.selectedKeys = selected;
+
+      if (isTouchLikeDevice() && selected.size > 0) {
+        for (const key of selected) {
+          ensurePathForKey(key);
+        }
+      }
 
       for (const [key, path] of appState.pathByKey) {
         path.classList.toggle("selected", selected.has(key));
@@ -2733,6 +2803,7 @@
           clearTouchPinchState();
           ui.map.classList.remove("is-dragging");
           scheduleLabelRender(90);
+          updateTouchVisiblePaths(appState.currentViewBox);
         }
         appState.suppressNextClick = true;
         if (event && typeof event.preventDefault === "function") {
@@ -2756,6 +2827,7 @@
         clearTouchPinchState();
         ui.map.classList.remove("is-dragging");
         scheduleLabelRender(90);
+        updateTouchVisiblePaths(appState.currentViewBox);
         appState.suppressNextClick = true;
         if (event && typeof event.preventDefault === "function") {
           event.preventDefault();
@@ -2777,6 +2849,7 @@
       if (moved) {
         appState.suppressNextClick = true;
         scheduleLabelRender(80);
+        updateTouchVisiblePaths(appState.currentViewBox);
         if (fromTouch && event && typeof event.preventDefault === "function") {
           event.preventDefault();
         }
@@ -3329,11 +3402,18 @@
     }
 
     function updateTouchVisiblePaths(viewBox) {
-      if (!isTouchLikeDevice() || !viewBox || appState.pathByKey.size === 0) {
+      if (!isTouchLikeDevice() || !viewBox) {
         return;
       }
 
-      const padScale = appState.isDraggingMap || appState.pinchActive ? 0.02 : 0.06;
+      const now = performance.now();
+      const moving = appState.isDraggingMap || appState.pinchActive;
+      if (moving && now - appState.touchVisibilityLastTs < 120) {
+        return;
+      }
+      appState.touchVisibilityLastTs = now;
+
+      const padScale = appState.isDraggingMap || appState.pinchActive ? 0.02 : 0.03;
       const padX = viewBox.width * padScale;
       const padY = viewBox.height * padScale;
       const minX = viewBox.x - padX;
@@ -3341,13 +3421,9 @@
       const minY = viewBox.y - padY;
       const maxY = viewBox.y + viewBox.height + padY;
       const selected = appState.selectedKeys || new Set();
+      const activeKey = activePath && activePath.dataset ? activePath.dataset.key : null;
 
       for (const union of appState.unions) {
-        const path = appState.pathByKey.get(union.key);
-        if (!path) {
-          continue;
-        }
-
         const bounds = union.screenBounds;
         const inViewport =
           bounds &&
@@ -3355,7 +3431,16 @@
           bounds.minX <= maxX &&
           bounds.maxY >= minY &&
           bounds.minY <= maxY;
-        const shouldShow = Boolean(inViewport || selected.has(union.key));
+        const shouldShow = Boolean(inViewport || selected.has(union.key) || union.key === activeKey);
+        let path = appState.pathByKey.get(union.key);
+
+        if (!path && shouldShow) {
+          path = ensureTouchPath(union);
+        }
+        if (!path) {
+          continue;
+        }
+
         const isHidden = path.dataset.hidden === "1";
 
         if (shouldShow && isHidden) {
@@ -3797,6 +3882,32 @@
         const y = height - (offY + (lat - bounds.minLat) * scale);
         return [x, y];
       };
+    }
+
+    function geometryToBounds(geometry, project) {
+      if (!geometry || !geometry.type || !geometry.coordinates) {
+        return null;
+      }
+
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+
+      walkGeometry(geometry, (lon, lat) => {
+        const projected = project(lon, lat);
+        const x = projected[0];
+        const y = projected[1];
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      });
+
+      if (!Number.isFinite(minX)) {
+        return null;
+      }
+      return { minX, maxX, minY, maxY };
     }
 
     function geometryToPathWithBounds(geometry, project, touchModeOverride) {
