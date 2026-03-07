@@ -565,6 +565,7 @@
       stroke-width: 0.44;
       fill-rule: evenodd;
       vector-effect: non-scaling-stroke;
+      shape-rendering: geometricPrecision;
       transition: opacity 90ms ease, stroke-width 90ms ease;
       cursor: inherit;
     }
@@ -575,6 +576,13 @@
 
     #map.is-dragging path.union {
       transition: none;
+      shape-rendering: optimizeSpeed;
+      stroke-width: 0.12;
+    }
+
+    #map.is-dragging path.union.selected,
+    #map.is-dragging path.union.active {
+      stroke-width: 0.24;
     }
 
     #map path.union.dimmed {
@@ -746,16 +754,28 @@
       font-weight: 600;
     }
 
+    .tt-head-row {
+      display: grid;
+      grid-template-columns: 1fr 150px;
+      gap: 14px;
+      align-items: end;
+      padding: 4px 0 5px;
+      border-bottom: 1px solid rgba(60, 55, 50, 0.10);
+    }
+
     .tt-head {
       display: grid;
-      grid-template-columns: 1fr 108px 70px;
+      grid-template-columns: 108px 70px;
       gap: 8px;
+      justify-content: end;
       font-size: 0.72rem;
       color: #8a7868;
       text-transform: uppercase;
       letter-spacing: 0.02em;
-      padding: 4px 0 5px;
-      border-bottom: 1px solid rgba(60, 55, 50, 0.10);
+    }
+
+    .tt-head span {
+      text-align: right;
     }
 
     .tt-wrap {
@@ -846,6 +866,10 @@
     }
 
     @media (max-width: 1030px) {
+      #map path.union {
+        stroke-width: 0.36;
+      }
+
       .app {
         grid-template-columns: 1fr;
         grid-template-rows: 1fr;
@@ -1257,7 +1281,19 @@
         grid-template-columns: 1fr;
       }
 
-      .tt-head,
+      .tt-head-row {
+        grid-template-columns: 1fr;
+        gap: 0;
+      }
+
+      .tt-head-spacer {
+        display: none;
+      }
+
+      .tt-head {
+        grid-template-columns: 92px 58px;
+      }
+
       .tt-row {
         grid-template-columns: 1fr 92px 58px;
       }
@@ -1404,6 +1440,7 @@
     const DATA_DATE = "March 7, 2026";
     const MAP_TITLE = "Bangladesh's 2026 Election Results — Down to Every Union";
     const INLINE_DICT_FILE = "./dict/inline-data.b64";
+    const INLINE_DICT_FILE_TOUCH = "./dict/inline-data-touch.b64";
     const CSV_FILE = "./alliance_level_data.csv";
 
     const PARTY_KEYS = [
@@ -1453,7 +1490,8 @@
     const ZOOM_BUTTON_FACTOR_OUT = 1.16;
     const ZOOM_BUTTON_DURATION = 240;
     const ZOOM_FOCUS_DURATION = 260;
-    const PHONE_DEFAULT_ZOOM_FACTOR = 0.56;
+    const PHONE_DEFAULT_ZOOM_FACTOR = 0.42;
+    const TOUCH_DEFAULT_ZOOM_FACTOR = 0.62;
     const DRAG_THRESHOLD_PX = 3;
     const ui = {
       map: document.getElementById("map"),
@@ -1513,7 +1551,8 @@
       wheelRafId: null,
       wheelFactor: 1,
       wheelPointX: 0,
-      wheelPointY: 0
+      wheelPointY: 0,
+      touchDataSimplified: false
     };
 
     let activePath = null;
@@ -1742,21 +1781,30 @@
     async function loadDefaultCsv() {
       // Fast path: external prebuilt base64 dict keeps HTML tiny for faster first paint.
       setLoadingLabel("Loading map data\u2026");
-      try {
-        const dictResp = await fetch(INLINE_DICT_FILE, { cache: "force-cache" });
-        if (dictResp.ok) {
+      const dictCandidates = isTouchLikeDevice()
+        ? [INLINE_DICT_FILE_TOUCH, INLINE_DICT_FILE]
+        : [INLINE_DICT_FILE];
+
+      for (const dictFile of dictCandidates) {
+        try {
+          const dictResp = await fetch(dictFile, { cache: "force-cache" });
+          if (!dictResp.ok) {
+            continue;
+          }
           const base64 = await dictResp.text();
           if (base64 && base64.trim()) {
-            return loadInlineData(base64);
+            return loadInlineData(base64, {
+              touchSimplified: dictFile === INLINE_DICT_FILE_TOUCH
+            });
           }
+        } catch (error) {
+          console.warn("Dict file unavailable (" + dictFile + "), trying fallback:", error);
         }
-      } catch (error) {
-        console.warn("Dict file unavailable, falling back:", error);
       }
 
       // Fallback: check legacy global variable
       if (typeof _INLINE_DATA !== "undefined") {
-        return loadInlineData(_INLINE_DATA);
+        return loadInlineData(_INLINE_DATA, { touchSimplified: false });
       }
       setStatus("Loading source CSV...");
       setLoadingLabel("Fetching data\u2026");
@@ -1773,12 +1821,13 @@
       }
     }
 
-    async function loadInlineData(base64) {
+    async function loadInlineData(base64, options) {
       setStatus("Loading data...");
       setLoadingLabel("Decoding data\u2026");
       try {
         await nextFrame();
         const raw = JSON.parse(atob(String(base64).trim()));
+        appState.touchDataSimplified = Boolean(options && options.touchSimplified);
 
         setLoadingLabel("Processing unions\u2026");
         await nextFrame();
@@ -1829,6 +1878,7 @@
       appState.bounds = computeGeoBounds(finalized.unions);
       appState.searchEntries = buildSearchEntries(finalized.unions);
       appState.scaleCap = finalized.scaleCap;
+      appState.touchDataSimplified = false;
       appState.currentSelection = null;
       appState.selectedKeys = new Set();
 
@@ -2240,7 +2290,7 @@
     }
 
     function resetView(animate) {
-      if (isPhoneScreen()) {
+      if (isTouchLikeDevice()) {
         setPhoneDefaultView(animate);
         return;
       }
@@ -2287,8 +2337,9 @@
       if (!base) {
         return null;
       }
-      const width = base.width * PHONE_DEFAULT_ZOOM_FACTOR;
-      const height = base.height * PHONE_DEFAULT_ZOOM_FACTOR;
+      const factor = isPhoneScreen() ? PHONE_DEFAULT_ZOOM_FACTOR : TOUCH_DEFAULT_ZOOM_FACTOR;
+      const width = base.width * factor;
+      const height = base.height * factor;
       return {
         x: base.x + (base.width - width) / 2,
         y: base.y + (base.height - height) / 2,
@@ -2372,7 +2423,7 @@
       const height = Math.max(460, Math.floor(ui.map.clientHeight));
 
       appState.baseViewBox = { x: 0, y: 0, width, height };
-      const initialViewBox = isPhoneScreen()
+      const initialViewBox = isTouchLikeDevice()
         ? phoneDefaultViewBox(appState.baseViewBox)
         : { ...appState.baseViewBox };
       appState.currentViewBox = initialViewBox || { ...appState.baseViewBox };
@@ -2418,6 +2469,7 @@
       ui.map.appendChild(labelLayer);
       appState.labelLayer = labelLayer;
       appState.districtAnchors = computeDistrictAnchors(appState.unions);
+      updateTouchVisiblePaths(appState.currentViewBox);
 
       if (appState.currentSelection) {
         if (isTouchLikeDevice()) {
@@ -2453,6 +2505,7 @@
         path.classList.toggle("selected", selected.has(key));
         path.classList.remove("dimmed");
       }
+      updateTouchVisiblePaths(appState.currentViewBox);
     }
 
     function unionPathFromEventTarget(target) {
@@ -3272,6 +3325,47 @@
           " " +
           viewBox.height.toFixed(2)
       );
+      updateTouchVisiblePaths(viewBox);
+    }
+
+    function updateTouchVisiblePaths(viewBox) {
+      if (!isTouchLikeDevice() || !viewBox || appState.pathByKey.size === 0) {
+        return;
+      }
+
+      const padScale = appState.isDraggingMap || appState.pinchActive ? 0.02 : 0.06;
+      const padX = viewBox.width * padScale;
+      const padY = viewBox.height * padScale;
+      const minX = viewBox.x - padX;
+      const maxX = viewBox.x + viewBox.width + padX;
+      const minY = viewBox.y - padY;
+      const maxY = viewBox.y + viewBox.height + padY;
+      const selected = appState.selectedKeys || new Set();
+
+      for (const union of appState.unions) {
+        const path = appState.pathByKey.get(union.key);
+        if (!path) {
+          continue;
+        }
+
+        const bounds = union.screenBounds;
+        const inViewport =
+          bounds &&
+          bounds.maxX >= minX &&
+          bounds.minX <= maxX &&
+          bounds.maxY >= minY &&
+          bounds.minY <= maxY;
+        const shouldShow = Boolean(inViewport || selected.has(union.key));
+        const isHidden = path.dataset.hidden === "1";
+
+        if (shouldShow && isHidden) {
+          path.style.display = "";
+          path.dataset.hidden = "0";
+        } else if (!shouldShow && !isHidden) {
+          path.style.display = "none";
+          path.dataset.hidden = "1";
+        }
+      }
     }
 
     function showTooltip(event, union) {
@@ -3317,10 +3411,12 @@
         '<p class="tt-title">' + escapeHtml(union.union) + "</p>" +
         '<p class="tt-sub">' + escapeHtml(union.upazila + ", " + union.district) + "</p>" +
         '<p class="tt-const">Constituency: ' + escapeHtml(constituencyText) + "</p>" +
-        '<div class="tt-head">' +
-          "<span>Candidate</span>" +
-          "<span>Votes</span>" +
-          "<span>Pct.</span>" +
+        '<div class="tt-head-row">' +
+          '<div class="tt-head">' +
+            "<span>Votes</span>" +
+            "<span>PCT.</span>" +
+          "</div>" +
+          '<div class="tt-head-spacer"></div>' +
         "</div>" +
         '<div class="tt-wrap">' +
           '<div class="tt-rows">' + rowsHtml + "</div>" +
@@ -3708,7 +3804,9 @@
         return { d: "", bounds: null };
       }
       const touchMode = Boolean(touchModeOverride);
-      const pathDecimals = touchMode ? 1 : 2;
+      const pathDecimals = touchMode
+        ? (appState.touchDataSimplified ? 1 : 0)
+        : 2;
 
       let path = "";
       let minX = Infinity;
@@ -3721,7 +3819,9 @@
           return;
         }
         let ringPath = "";
-        const pointStep = touchMode ? (ring.length > 220 ? 3 : ring.length > 110 ? 2 : 1) : 1;
+        const pointStep = touchMode
+          ? (appState.touchDataSimplified ? 1 : touchPointStepForRingLength(ring.length))
+          : 1;
         for (let i = 0; i < ring.length; i += pointStep) {
           const point = ring[i];
           const lon = Number(point && point[0]);
@@ -3764,7 +3864,12 @@
       };
 
       const appendPolygon = (polygonRings) => {
-        for (const ring of polygonRings) {
+        for (let ringIndex = 0; ringIndex < polygonRings.length; ringIndex += 1) {
+          // Mobile fast path: keep the outer ring only.
+          if (touchMode && ringIndex > 0) {
+            continue;
+          }
+          const ring = polygonRings[ringIndex];
           appendRing(ring);
         }
       };
@@ -3785,6 +3890,17 @@
         d: path,
         bounds: { minX, maxX, minY, maxY }
       };
+    }
+
+    function touchPointStepForRingLength(length) {
+      const n = Number(length) || 0;
+      if (n > 900) return 12;
+      if (n > 520) return 9;
+      if (n > 300) return 7;
+      if (n > 180) return 6;
+      if (n > 90) return 4;
+      if (n > 44) return 3;
+      return 2;
     }
 
     function walkGeometry(geometry, onPoint) {
